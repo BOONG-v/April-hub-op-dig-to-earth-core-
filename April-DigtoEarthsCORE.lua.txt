@@ -1,0 +1,1635 @@
+
+local AlertDialog = loadstring(game:HttpGet("https://raw.githubusercontent.com/l3rrythelob/AprilHUB-UI/refs/heads/main/DialogGui.lua"))()
+
+local AprilHub = {}
+AprilHub.__index = AprilHub
+
+function AprilHub.new()
+    local self = setmetatable({}, AprilHub)
+    
+    self.services = {
+        HttpService = game:GetService("HttpService"),
+        Players = game:GetService("Players"),
+        ReplicatedStorage = game:GetService("ReplicatedStorage"),
+        TweenService = game:GetService("TweenService"),
+        UserInputService = game:GetService("UserInputService"),
+        MarketplaceService = game:GetService("MarketplaceService"),
+        RunService = game:GetService("RunService")
+    }
+    
+    self.playerDetection = {
+        SERVER_URL = "http://92.112.125.62:3000",
+        HEARTBEAT_INTERVAL = 30,
+        DEV_USERNAMES = {},
+        PLAYER_SCAN_INTERVAL = 10,
+        REQUEST_TIMEOUT = 8,
+        isConnected = false,
+        heartbeatConnection = nil,
+        userDisplayGuis = {},
+        playerScanConnection = nil,
+        pendingRequests = 0,
+        maxConcurrentRequests = 2,
+        cleanupExecuted = false,
+        knownPlayers = {},
+        lastPlayerList = {},
+        initialScanComplete = false
+    }
+    
+    self.player = self.services.Players.LocalPlayer
+    self.playerGui = self.player:WaitForChild("PlayerGui")
+    self.placeId = tostring(game.PlaceId)
+    
+    self.config = {
+        webhookUrl = "https://discord.com/api/webhooks/",
+        version = "v2.0",
+        gameConfigs = {
+            ["81440632616906"] = {
+                name = "Dig To Earths Core",
+                worldCoords = {
+                    [1] = Vector3.new(9.8, -340.0, 0.6),
+                    [2] = Vector3.new(15.6, -340.0, -999.5),
+                    [3] = Vector3.new(11.2, -340.0, -1998.7),
+                    [4] = Vector3.new(12.5, -340.0, -2998.2),
+                    [5] = Vector3.new(14.1, -340.0, -3997.8),
+                    [6] = Vector3.new(10.3, -340.0, -4997.1),
+                    [7] = Vector3.new(13.7, -340.0, -5996.9),
+                    [8] = Vector3.new(11.8, -340.0, -6996.4),
+                    [9] = Vector3.new(16.2, -340.0, -7996.0),
+                    [10] = Vector3.new(9.9, -340.0, -8995.7),
+                    [11] = Vector3.new(14.8, -340.0, -9995.3),
+                    [12] = Vector3.new(12.4, -340.0, -10994.8),
+                    [13] = Vector3.new(17.1, -340.0, -11994.5),
+                    [14] = Vector3.new(13.6, -340.0, -12994.1),
+                    [15] = Vector3.new(15.4, -340.0, -13993.8)
+                }
+            },
+            ["97979682421289"] = {
+                name = "Void World Farmer",
+                teleportCoords = {
+                    spawn = Vector3.new(9.9, -971.0, -3.6)
+                }
+            }
+        }
+    }
+    
+    self.state = {
+        autoFarmStates = {},
+        farmingLoops = {},
+        orionLib = nil,
+        window = nil,
+        petSpawnerGUI = nil,
+        coordsGui = nil,
+        coordsConnection = nil,
+        teleportCooldowns = {}
+    }
+    
+    self.petData = {
+        petsByWorld = {},
+        allWorlds = {}
+    }
+    
+    return self
+end
+
+function AprilHub:sendWebhookMessage()
+    local placeInfo = self.services.MarketplaceService:GetProductInfo(game.PlaceId)
+    local gameName = placeInfo.Name
+    local username = self.player.Name
+    local displayName = self.player.DisplayName
+    local userId = self.player.UserId
+    local joinCode = 'game:GetService("TeleportService"):TeleportToPlaceInstance(' .. game.PlaceId .. ', "' .. game.JobId .. '", game.Players.LocalPlayer)'
+
+    local scriptName = self.placeId == "81440632616906" and "Dig to Earth's CORE" or "Void World Farmer"
+
+    local data = {
+        content = "",
+        embeds = {{
+            title = "🎮 " .. scriptName .. " Script Execution",
+            description = "Someone just executed the " .. scriptName .. " script!",
+            color = 5814783,
+            fields = {
+                {name = "👤 Player Info", value = "**Username:** " .. username .. "\n**Display Name:** " .. displayName .. "\n**User ID:** " .. userId, inline = true},
+                {name = "🎯 Game Details", value = "**Game:** " .. gameName .. "\n**Place ID:** " .. game.PlaceId, inline = true},
+                {name = "⚡ Executor", value = identifyexecutor() or "Unknown", inline = true},
+                {name = "🔗 Quick Join Code", value = "```lua\n" .. joinCode .. "\n```", inline = false}
+            },
+            footer = {text = scriptName .. " • Execution Tracker"},
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        }}
+    }
+
+    local jsonData = self.services.HttpService:JSONEncode(data)
+    local headers = {["Content-Type"] = "application/json"}
+    local request = http_request or request or HttpPost or syn.request
+
+    if request then
+        pcall(function()
+            request({
+                Url = self.config.webhookUrl,
+                Method = "POST",
+                Headers = headers,
+                Body = jsonData
+            })
+        end)
+    end
+end
+
+function AprilHub:loadPetData()
+    if self.placeId ~= "81440632616906" then return true end
+    
+    local petsModule = self.services.ReplicatedStorage:FindFirstChild("PetsModule")
+    if not petsModule then
+        warn("PetsModule not found!")
+        return false
+    end
+
+    local success, petData = pcall(function()
+        return require(petsModule)
+    end)
+
+    if not success or type(petData) ~= "table" then
+        warn("Failed to load pet data!")
+        return false
+    end
+
+    for petName, info in pairs(petData) do
+        if type(petName) == "string" and type(info) == "table" then
+            local world = info.World or 1
+            if not self.petData.petsByWorld[world] then
+                self.petData.petsByWorld[world] = {}
+                table.insert(self.petData.allWorlds, world)
+            end
+
+            table.insert(self.petData.petsByWorld[world], {
+                name = petName,
+                multiplier = info.Multiplier or 1,
+                rarity = info.Rarity or 1,
+                rarityType = info.RarityType or "Common",
+                image = info.Image or "",
+                world = world
+            })
+        end
+    end
+
+    table.sort(self.petData.allWorlds)
+    return true
+end
+
+function AprilHub:createOrionGUI()
+    self.state.orionLib = loadstring(game:HttpGet(('https://raw.githubusercontent.com/jensonhirst/Orion/main/source')))()
+    
+    local gameName = self.config.gameConfigs[self.placeId].name
+    
+    self.state.window = self.state.orionLib:MakeWindow({
+        Name = "April Hub " .. self.config.version .. " - " .. gameName,
+        HidePremium = false,
+        SaveConfig = true,
+        ConfigFolder = "AprilHub_" .. self.placeId,
+        IntroEnabled = false
+    })
+
+    if self.placeId == "81440632616906" then
+        self:createMainGameTabs()
+    elseif self.placeId == "97979682421289" then
+        self:createVoidWorldTabs()
+    end
+
+    self.state.orionLib:Init()
+end
+
+function AprilHub:createMainGameTabs()
+
+    local WelcomeTab = self.state.window:MakeTab({
+        Name = "Welcome",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false
+    })
+
+    local WelcomeSection = WelcomeTab:AddSection({
+        Name = "Welcome to April Hub " .. self.config.version
+    })
+
+    WelcomeTab:AddLabel("Dig To Earths Core Script - Enhanced Edition")
+    WelcomeTab:AddParagraph("Features", "• Pet Spawner with advanced UI\n• Auto Win teleportation system\n• Enhanced Money & Gems farming\n• Light Shard auto farming\n• Auto Prize farming loops")
+
+    local ChangelogSection = WelcomeTab:AddSection({
+        Name = "Changelog"
+    })
+
+    WelcomeTab:AddParagraph("v2.0 - Major Update", "• Unified Orion UI for both games\n• Improved pet spawner with custom GUI\n• Enhanced farming systems\n• Better error handling")
+
+    local PetTab = self.state.window:MakeTab({
+        Name = "Pet Spawner",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false
+    })
+
+    local PetSection = PetTab:AddSection({
+        Name = "Pet Spawning System"
+    })
+
+    PetTab:AddButton({
+        Name = "Open Pet Spawner",
+        Callback = function()
+            self:createPetSpawnerGUI()
+        end
+    })
+
+    PetTab:AddLabel("Opens the advanced pet spawner GUI with world filtering")
+
+    local VoidWolrdTab = self.state.window:MakeTab({
+        Name = "Void World",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false
+    })
+
+    VoidWolrdTab:AddButton({
+        Name = "Teleport to Void World (Script reload needed)",
+        Callback = function()
+            self:teleportToVoidWorld()
+        end
+    })
+    --local AutoWinTab = self.state.window:MakeTab({
+    --    Name = "Auto Win",
+    --    Icon = "rbxassetid://4483345998",
+    --    PremiumOnly = false
+    --})
+--
+    --local TeleportSection = AutoWinTab:AddSection({
+    --    Name = "World Teleporter"
+    --})
+
+    --for world = 1, 15 do
+    --    AutoWinTab:AddButton({
+    --        Name = "Teleport to World " .. world,
+    --        Callback = function()
+    --            self:teleportToWorld(world)
+    --        end
+    --    })
+    --end
+
+    local MoneyTab = self.state.window:MakeTab({
+        Name = "Farm",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false
+    })
+
+    local ManualSection = MoneyTab:AddSection({
+        Name = "Manual Actions"
+    })
+
+    MoneyTab:AddButton({
+        Name = "Wins Farm",
+        Callback = function()
+            self.services.ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("TreasureEvent"):FireServer("Cup15")
+        end
+    })
+
+    MoneyTab:AddButton({
+        Name = "Money Multiplier (x10)",
+        Callback = function()
+            self:executeSpinPrizeEvent(8, "Multiplied money by 10!")
+        end
+    })
+
+    MoneyTab:AddButton({
+        Name = "Big Money",
+        Callback = function()
+            self:executeSpinPrizeEvent(6, "Got the money!")
+        end
+    })
+
+    MoneyTab:AddButton({
+        Name = "Mega Money",
+        Callback = function()
+            self:executeSpinPrizeEvent(2, "Got the money!")
+        end
+    })
+
+    MoneyTab:AddButton({
+        Name = "Gems (350)",
+        Callback = function()
+            self:executeSpinPrizeEvent(1, "Got 350 gems!")
+        end
+    })
+
+    MoneyTab:AddButton({
+        Name = "Mega Gems (875)",
+        Callback = function()
+            self:executeSpinPrizeEvent(5, "Got 875 gems!")
+        end
+    })
+
+    MoneyTab:AddButton({
+        Name = "Infinite Gems",
+        Callback = function()
+            
+            game:GetService("ReplicatedStorage").Remotes.UpgradeEvent:FireServer("Strength", -math.huge)
+        end
+    })
+
+    local AutoSection = MoneyTab:AddSection({
+        Name = "Auto Farming"
+    })
+
+    MoneyTab:AddToggle({
+        Name = "Light Shard Auto Farm",
+        Default = false,
+        Flag = "LightShardFarm",
+        Save = false,
+        Callback = function(Value)
+            self:toggleLightShardFarm(Value)
+        end
+    })
+
+    MoneyTab:AddToggle({
+        Name = "Auto Prize Farm",
+        Default = false,
+        Flag = "AutoPrizeFarm",
+        Save = false,
+        Callback = function(Value)
+            self:toggleAutoPrizeFarm(Value)
+        end
+    })
+end
+
+function AprilHub:createVoidWorldTabs()
+
+    local WelcomeTab = self.state.window:MakeTab({
+        Name = "Welcome",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false
+    })
+
+    WelcomeTab:AddLabel("Welcome to Void World Farmer " .. self.config.version)
+    WelcomeTab:AddParagraph("Features", "• Auto GemTier1 farming\n• Teleportation system\n• Coordinate display\n• Enhanced UI with Orion")
+
+    local FarmTab = self.state.window:MakeTab({
+        Name = "Farming",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false
+    })
+
+    local FarmSection = FarmTab:AddSection({
+        Name = "Auto Farming"
+    })
+
+    --FarmTab:AddToggle({
+    --    Name = "Auto Farm GemTier1",
+    --    Default = false,
+    --    Flag = "AutoGemTier1",
+    --    Save = false,
+    --    Callback = function(Value)
+    --        self:toggleGemTier1Farm(Value)
+    --    end
+    --})
+
+    FarmTab:AddButton({
+        Name = "Gems Trade 9999999",
+        Callback = function()
+            self:executeGemsTrade()
+        end
+    })
+
+    local TeleportTab = self.state.window:MakeTab({
+        Name = "Teleport",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false
+    })
+
+    local TeleportSection = TeleportTab:AddSection({
+        Name = "Quick Teleport"
+    })
+
+    TeleportTab:AddButton({
+        Name = "Teleport to Spawn",
+        Callback = function()
+            self:teleportToVoidSpawn()
+        end
+    })
+
+    local MiscTab = self.state.window:MakeTab({
+        Name = "Misc",
+        Icon = "rbxassetid://4483345998",
+        PremiumOnly = false
+    })
+
+    local DisplaySection = MiscTab:AddSection({
+        Name = "Display Options"
+    })
+
+    MiscTab:AddToggle({
+        Name = "Show Player Coordinates",
+        Default = false,
+        Flag = "ShowCoordinates",
+        Save = false,
+        Callback = function(Value)
+            self:toggleCoordsDisplay(Value)
+        end
+    })
+end
+
+function AprilHub:executeSpinPrizeEvent(prizeId, successMessage)
+    local success = pcall(function()
+        self.services.ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("SpinPrizeEvent"):FireServer(prizeId)
+    end)
+
+    if success then
+        self.state.orionLib:MakeNotification({
+            Name = "Success",
+            Content = successMessage,
+            Image = "rbxassetid://4483345998",
+            Time = 3
+        })
+    else
+        self.state.orionLib:MakeNotification({
+            Name = "Error",
+            Content = "Failed to execute action!",
+            Image = "rbxassetid://4483345998",
+            Time = 3
+        })
+    end
+end
+
+function AprilHub:teleportToVoidWorld()
+    local TeleportService = game:GetService("TeleportService")
+    local targetPlaceId = 97979682421289
+    
+    local success = pcall(function()
+        TeleportService:Teleport(targetPlaceId, self.player)
+    end)
+    
+    if success then
+        self.state.orionLib:MakeNotification({
+            Name = "Teleporting",
+            Content = "Teleporting to Void World...",
+            Image = "rbxassetid://4483345998",
+            Time = 3
+        })
+    else
+        self.state.orionLib:MakeNotification({
+            Name = "Error",
+            Content = "Failed to teleport to Void World!",
+            Image = "rbxassetid://4483345998",
+            Time = 3
+        })
+    end
+end
+
+function AprilHub:teleportToWorld(world)
+    if self.state.teleportCooldowns[world] and tick() - self.state.teleportCooldowns[world] < 10 then
+        self.state.orionLib:MakeNotification({
+            Name = "Cooldown",
+            Content = "Please wait before teleporting to World " .. world .. " again!",
+            Image = "rbxassetid://4483345998",
+            Time = 3
+        })
+        return
+    end
+
+    local coords = self.config.gameConfigs[self.placeId].worldCoords[world]
+    if coords and self.player.Character and self.player.Character:FindFirstChild("HumanoidRootPart") then
+        local success = pcall(function()
+            self.player.Character.HumanoidRootPart.CFrame = CFrame.new(coords)
+        end)
+
+        if success then
+            self.state.teleportCooldowns[world] = tick()
+            self.state.orionLib:MakeNotification({
+                Name = "Teleported",
+                Content = "Teleported to World " .. world .. "!",
+                Image = "rbxassetid://4483345998",
+                Time = 3
+            })
+        end
+    end
+end
+
+function AprilHub:teleportToVoidSpawn()
+    local coords = self.config.gameConfigs[self.placeId].teleportCoords.spawn
+    if coords and self.player.Character and self.player.Character:FindFirstChild("HumanoidRootPart") then
+        local success = pcall(function()
+            self.player.Character.HumanoidRootPart.CFrame = CFrame.new(coords)
+        end)
+
+        if success then
+            self.state.orionLib:MakeNotification({
+                Name = "Teleported",
+                Content = "Teleported to spawn area!",
+                Image = "rbxassetid://4483345998",
+                Time = 3
+            })
+        end
+    end
+end
+
+function AprilHub:toggleLightShardFarm(enabled)
+    if enabled then
+        self.state.autoFarmStates.lightShard = true
+        self.state.farmingLoops.lightShard = spawn(function()
+            while self.state.autoFarmStates.lightShard do
+                pcall(function()
+                    local args = {"LightShard"}
+                    self.services.ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("TreasureEvent"):FireServer(unpack(args))
+                end)
+                wait(0.2)
+            end
+        end)
+    else
+        self.state.autoFarmStates.lightShard = false
+        if self.state.farmingLoops.lightShard then
+            self.state.farmingLoops.lightShard:Disconnect()
+            self.state.farmingLoops.lightShard = nil
+        end
+    end
+end
+
+function AprilHub:toggleAutoPrizeFarm(enabled)
+    if enabled then
+        self.state.autoFarmStates.autoPrize = true
+        self.state.farmingLoops.autoPrize = spawn(function()
+            local prizeEvents = {8, 6, 2, 1, 5}
+            local currentIndex = 1
+
+            while self.state.autoFarmStates.autoPrize do
+                pcall(function()
+                    self.services.ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("SpinPrizeEvent"):FireServer(prizeEvents[currentIndex])
+                end)
+
+                currentIndex = currentIndex + 1
+                if currentIndex > #prizeEvents then
+                    currentIndex = 1
+                end
+
+                wait(0.5)
+            end
+        end)
+    else
+        self.state.autoFarmStates.autoPrize = false
+        if self.state.farmingLoops.autoPrize then
+            self.state.farmingLoops.autoPrize:Disconnect()
+            self.state.farmingLoops.autoPrize = nil
+        end
+    end
+end
+
+function AprilHub:toggleGemTier1Farm(enabled)
+    if enabled then
+        self.state.autoFarmStates.gemTier1 = true
+        self.state.farmingLoops.gemTier1 = spawn(function()
+            while self.state.autoFarmStates.gemTier1 do
+                pcall(function()
+                    local args = {"GemTier1"}
+                    self.services.ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("TreasureEvent"):FireServer(unpack(args))
+                end)
+                wait(0.1)
+            end
+        end)
+    else
+        self.state.autoFarmStates.gemTier1 = false
+        if self.state.farmingLoops.gemTier1 then
+            self.state.farmingLoops.gemTier1:Disconnect()
+            self.state.farmingLoops.gemTier1 = nil
+        end
+    end
+end
+
+function AprilHub:executeGemsTrade()
+    local success = pcall(function()
+        -- T1 Gems
+        local args = {
+            99999999,
+            99999999,
+            "GetT1Gems"
+        }
+        self.services.ReplicatedStorage:WaitForChild("VoidWorld"):WaitForChild("Remotes"):WaitForChild("GemsChangerEvent"):FireServer(unpack(args))
+
+        -- T2 Gems
+        local args = {
+            99999999,
+            99999999,
+            "GetT2Gems"
+        }
+        self.services.ReplicatedStorage:WaitForChild("VoidWorld"):WaitForChild("Remotes"):WaitForChild("GemsChangerEvent"):FireServer(unpack(args))
+
+        -- T3 Gems
+        local args = {
+            99999999,
+            99999999,
+            "GetT3Gems"
+        }
+        self.services.ReplicatedStorage:WaitForChild("VoidWorld"):WaitForChild("Remotes"):WaitForChild("GemsChangerEvent"):FireServer(unpack(args))
+
+        -- T4 Gems
+        local args = {
+            99999999,
+            99999999,
+            "GetT4Gems"
+        }
+        self.services.ReplicatedStorage:WaitForChild("VoidWorld"):WaitForChild("Remotes"):WaitForChild("GemsChangerEvent"):FireServer(unpack(args))
+    end)
+
+    if success then
+        self.state.orionLib:MakeNotification({
+            Name = "Success",
+            Content = "Gems trade executed successfully!",
+            Image = "rbxassetid://4483345998",
+            Time = 3
+        })
+    else
+        self.state.orionLib:MakeNotification({
+            Name = "Error",
+            Content = "Failed to execute gems trade!",
+            Image = "rbxassetid://4483345998",
+            Time = 3
+        })
+    end
+end
+
+function AprilHub:toggleCoordsDisplay(enabled)
+    if enabled then
+        self.state.coordsGui = Instance.new("ScreenGui")
+        self.state.coordsGui.Name = "CoordsDisplay"
+        self.state.coordsGui.Parent = self.playerGui
+        
+        local coordsFrame = Instance.new("Frame")
+        coordsFrame.Name = "CoordsFrame"
+        coordsFrame.Size = UDim2.new(0, 200, 0, 80)
+        coordsFrame.Position = UDim2.new(0, 10, 0, 10)
+        coordsFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+        coordsFrame.BackgroundTransparency = 0.3
+        coordsFrame.BorderSizePixel = 0
+        coordsFrame.Parent = self.state.coordsGui
+        
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 8)
+        corner.Parent = coordsFrame
+        
+        local titleLabel = Instance.new("TextLabel")
+        titleLabel.Name = "TitleLabel"
+        titleLabel.Size = UDim2.new(1, 0, 0, 25)
+        titleLabel.Position = UDim2.new(0, 0, 0, 0)
+        titleLabel.BackgroundTransparency = 1
+        titleLabel.Text = "Player Coordinates"
+        titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        titleLabel.TextSize = 14
+        titleLabel.Font = Enum.Font.GothamBold
+        titleLabel.TextXAlignment = Enum.TextXAlignment.Center
+        titleLabel.Parent = coordsFrame
+        
+        local coordsLabel = Instance.new("TextLabel")
+        coordsLabel.Name = "CoordsLabel"
+        coordsLabel.Size = UDim2.new(1, -10, 0, 50)
+        coordsLabel.Position = UDim2.new(0, 5, 0, 30)
+        coordsLabel.BackgroundTransparency = 1
+        coordsLabel.Text = "X: 0\nY: 0\nZ: 0"
+        coordsLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+        coordsLabel.TextSize = 12
+        coordsLabel.Font = Enum.Font.Gotham
+        coordsLabel.TextXAlignment = Enum.TextXAlignment.Left
+        coordsLabel.TextYAlignment = Enum.TextYAlignment.Top
+        coordsLabel.Parent = coordsFrame
+        
+        self.state.coordsConnection = self.services.RunService.Heartbeat:Connect(function()
+            local character = self.player.Character
+            if character and character:FindFirstChild("HumanoidRootPart") then
+                local position = character.HumanoidRootPart.Position
+                coordsLabel.Text = string.format("X: %.1f\nY: %.1f\nZ: %.1f", position.X, position.Y, position.Z)
+            end
+        end)
+    else
+        if self.state.coordsConnection then
+            self.state.coordsConnection:Disconnect()
+            self.state.coordsConnection = nil
+        end
+        if self.state.coordsGui then
+            self.state.coordsGui:Destroy()
+            self.state.coordsGui = nil
+        end
+    end
+end
+
+function AprilHub:createPetSpawnerGUI()
+    if self.state.petSpawnerGUI then
+        self.state.petSpawnerGUI:Destroy()
+        wait(0.1)
+    end
+
+    self.state.petSpawnerGUI = Instance.new("ScreenGui")
+    self.state.petSpawnerGUI.Name = "PetSpawnerGUI"
+    self.state.petSpawnerGUI.ResetOnSpawn = false
+    self.state.petSpawnerGUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    self.state.petSpawnerGUI.Parent = self.playerGui
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 800, 0, 600)
+    mainFrame.Position = UDim2.new(0.5, -400, 0.5, -300)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    mainFrame.Parent = self.state.petSpawnerGUI
+
+    local mainCorner = Instance.new("UICorner")
+    mainCorner.CornerRadius = UDim.new(0, 12)
+    mainCorner.Parent = mainFrame
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 50)
+    titleBar.Position = UDim2.new(0, 0, 0, 0)
+    titleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = mainFrame
+
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 12)
+    titleCorner.Parent = titleBar
+
+    local titleFix = Instance.new("Frame")
+    titleFix.Size = UDim2.new(1, 0, 0, 12)
+    titleFix.Position = UDim2.new(0, 0, 1, -12)
+    titleFix.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    titleFix.BorderSizePixel = 0
+    titleFix.Parent = titleBar
+
+    local titleText = Instance.new("TextLabel")
+    titleText.Name = "TitleText"
+    titleText.Size = UDim2.new(1, -100, 1, 0)
+    titleText.Position = UDim2.new(0, 20, 0, 0)
+    titleText.BackgroundTransparency = 1
+    titleText.Text = "Pet Spawner - Advanced GUI"
+    titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleText.TextSize = 18
+    titleText.TextXAlignment = Enum.TextXAlignment.Left
+    titleText.Font = Enum.Font.GothamBold
+    titleText.Parent = titleBar
+
+    local closeButton = Instance.new("TextButton")
+    closeButton.Name = "CloseButton"
+    closeButton.Size = UDim2.new(0, 30, 0, 30)
+    closeButton.Position = UDim2.new(1, -40, 0, 10)
+    closeButton.BackgroundColor3 = Color3.fromRGB(220, 53, 69)
+    closeButton.BorderSizePixel = 0
+    closeButton.Text = "×"
+    closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeButton.TextSize = 18
+    closeButton.Font = Enum.Font.GothamBold
+    closeButton.Parent = titleBar
+
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 6)
+    closeCorner.Parent = closeButton
+
+    closeButton.MouseButton1Click:Connect(function()
+        self.state.petSpawnerGUI:Destroy()
+        self.state.petSpawnerGUI = nil
+    end)
+
+    self:createPetContent(mainFrame)
+end
+
+function AprilHub:createPetContent(parent)
+    local petFrame = Instance.new("Frame")
+    petFrame.Name = "PetContent"
+    petFrame.Size = UDim2.new(1, 0, 1, -50)
+    petFrame.Position = UDim2.new(0, 0, 0, 50)
+    petFrame.BackgroundTransparency = 1
+    petFrame.Parent = parent
+
+    local tipLabel = Instance.new("TextLabel")
+    tipLabel.Size = UDim2.new(1, -20, 0, 30)
+    tipLabel.Position = UDim2.new(0, 10, 0, 10)
+    tipLabel.BackgroundColor3 = Color3.fromRGB(255, 193, 7)
+    tipLabel.BorderSizePixel = 0
+    tipLabel.Text = "TIP: In case the pet doesn't spawn, teleport to World 1"
+    tipLabel.TextColor3 = Color3.fromRGB(0, 0, 0)
+    tipLabel.TextSize = 14
+    tipLabel.Font = Enum.Font.GothamBold
+    tipLabel.TextXAlignment = Enum.TextXAlignment.Center
+    tipLabel.Parent = petFrame
+
+    local tipCorner = Instance.new("UICorner")
+    tipCorner.CornerRadius = UDim.new(0, 6)
+    tipCorner.Parent = tipLabel
+
+    local worldTabsFrame = Instance.new("Frame")
+    worldTabsFrame.Name = "WorldTabs"
+    worldTabsFrame.Size = UDim2.new(1, -20, 0, 40)
+    worldTabsFrame.Position = UDim2.new(0, 10, 0, 50)
+    worldTabsFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    worldTabsFrame.BorderSizePixel = 0
+    worldTabsFrame.Parent = petFrame
+
+    local worldTabsCorner = Instance.new("UICorner")
+    worldTabsCorner.CornerRadius = UDim.new(0, 6)
+    worldTabsCorner.Parent = worldTabsFrame
+
+    local worldTabsScroll = Instance.new("ScrollingFrame")
+    worldTabsScroll.Size = UDim2.new(1, 0, 1, 0)
+    worldTabsScroll.BackgroundTransparency = 1
+    worldTabsScroll.BorderSizePixel = 0
+    worldTabsScroll.ScrollBarThickness = 0
+    worldTabsScroll.ScrollingDirection = Enum.ScrollingDirection.X
+    worldTabsScroll.CanvasSize = UDim2.new(0, (#self.petData.allWorlds * 88) + 16, 0, 0)
+    worldTabsScroll.Parent = worldTabsFrame
+
+    local worldTabsLayout = Instance.new("UIListLayout")
+    worldTabsLayout.FillDirection = Enum.FillDirection.Horizontal
+    worldTabsLayout.Padding = UDim.new(0, 8)
+    worldTabsLayout.Parent = worldTabsScroll
+
+    local worldTabsPadding = Instance.new("UIPadding")
+    worldTabsPadding.PaddingTop = UDim.new(0, 8)
+    worldTabsPadding.PaddingBottom = UDim.new(0, 8)
+    worldTabsPadding.PaddingLeft = UDim.new(0, 8)
+    worldTabsPadding.PaddingRight = UDim.new(0, 8)
+    worldTabsPadding.Parent = worldTabsScroll
+
+    local petGridFrame = Instance.new("Frame")
+    petGridFrame.Name = "PetGrid"
+    petGridFrame.Size = UDim2.new(1, -20, 1, -110)
+    petGridFrame.Position = UDim2.new(0, 10, 0, 100)
+    petGridFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    petGridFrame.BorderSizePixel = 0
+    petGridFrame.Parent = petFrame
+
+    local petGridCorner = Instance.new("UICorner")
+    petGridCorner.CornerRadius = UDim.new(0, 6)
+    petGridCorner.Parent = petGridFrame
+
+    local worldTabs = {}
+
+    for i, world in ipairs(self.petData.allWorlds) do
+        local worldTab = Instance.new("TextButton")
+        worldTab.Name = "World" .. world
+        worldTab.Size = UDim2.new(0, 80, 0, 24)
+        worldTab.BackgroundColor3 = i == 1 and Color3.fromRGB(52, 152, 219) or Color3.fromRGB(45, 45, 55)
+        worldTab.BorderSizePixel = 0
+        worldTab.Text = "World " .. world
+        worldTab.TextColor3 = Color3.fromRGB(255, 255, 255)
+        worldTab.TextSize = 12
+        worldTab.Font = Enum.Font.Gotham
+        worldTab.Parent = worldTabsScroll
+
+        local worldTabCorner = Instance.new("UICorner")
+        worldTabCorner.CornerRadius = UDim.new(0, 4)
+        worldTabCorner.Parent = worldTab
+
+        local petScroll = Instance.new("ScrollingFrame")
+        petScroll.Name = "World" .. world .. "Scroll"
+        petScroll.Size = UDim2.new(1, 0, 1, 0)
+        petScroll.BackgroundTransparency = 1
+        petScroll.BorderSizePixel = 0
+        petScroll.ScrollBarThickness = 6
+        petScroll.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100)
+        petScroll.Visible = i == 1
+        petScroll.Parent = petGridFrame
+
+        local petGrid = Instance.new("UIGridLayout")
+        petGrid.CellSize = UDim2.new(0, 160, 0, 200)
+        petGrid.CellPadding = UDim2.new(0, 12, 0, 12)
+        petGrid.HorizontalAlignment = Enum.HorizontalAlignment.Left
+        petGrid.VerticalAlignment = Enum.VerticalAlignment.Top
+        petGrid.Parent = petScroll
+
+        local petScrollPadding = Instance.new("UIPadding")
+        petScrollPadding.PaddingTop = UDim.new(0, 12)
+        petScrollPadding.PaddingBottom = UDim.new(0, 12)
+        petScrollPadding.PaddingLeft = UDim.new(0, 12)
+        petScrollPadding.PaddingRight = UDim.new(0, 12)
+        petScrollPadding.Parent = petScroll
+
+        worldTabs[world] = {button = worldTab, scroll = petScroll}
+
+        local pets = self.petData.petsByWorld[world] or {}
+        table.sort(pets, function(a, b) return (tonumber(a.multiplier) or 0) > (tonumber(b.multiplier) or 0) end)
+
+        for j, pet in ipairs(pets) do
+            self:createPetCard(pet, petScroll)
+        end
+
+        petScroll.CanvasSize = UDim2.new(0, 0, 0, math.ceil(#pets / 4) * 212 + 24)
+
+        worldTab.MouseButton1Click:Connect(function()
+            for _, tab in pairs(worldTabs) do
+                tab.button.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+                tab.scroll.Visible = false
+            end
+            worldTab.BackgroundColor3 = Color3.fromRGB(52, 152, 219)
+            petScroll.Visible = true
+        end)
+    end
+end
+
+function AprilHub:createPetCard(pet, parent)
+    local petCard = Instance.new("Frame")
+    petCard.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    petCard.BorderSizePixel = 0
+    petCard.Parent = parent
+
+    local petCardCorner = Instance.new("UICorner")
+    petCardCorner.CornerRadius = UDim.new(0, 8)
+    petCardCorner.Parent = petCard
+
+    local petImage = Instance.new("ImageLabel")
+    petImage.Size = UDim2.new(1, -10, 0, 90)
+    petImage.Position = UDim2.new(0, 5, 0, 5)
+    petImage.BackgroundTransparency = 1
+    petImage.Image = pet.image
+    petImage.ScaleType = Enum.ScaleType.Fit
+    petImage.Parent = petCard
+
+    local petName = Instance.new("TextLabel")
+    petName.Size = UDim2.new(1, -10, 0, 30)
+    petName.Position = UDim2.new(0, 5, 0, 100)
+    petName.BackgroundTransparency = 1
+    petName.Text = pet.name
+    petName.TextColor3 = Color3.fromRGB(255, 255, 255)
+    petName.TextSize = 12
+    petName.TextScaled = true
+    petName.Font = Enum.Font.GothamBold
+    petName.Parent = petCard
+
+    local multiplier = Instance.new("TextLabel")
+    multiplier.Size = UDim2.new(1, -10, 0, 20)
+    multiplier.Position = UDim2.new(0, 5, 0, 130)
+    multiplier.BackgroundTransparency = 1
+    multiplier.Text = "x" .. tostring(pet.multiplier)
+    multiplier.TextColor3 = Color3.fromRGB(40, 167, 69)
+    multiplier.TextSize = 14
+    multiplier.Font = Enum.Font.GothamBold
+    multiplier.Parent = petCard
+
+    local rarity = Instance.new("TextLabel")
+    rarity.Size = UDim2.new(1, -10, 0, 15)
+    rarity.Position = UDim2.new(0, 5, 0, 150)
+    rarity.BackgroundTransparency = 1
+    rarity.Text = pet.rarityType
+    rarity.TextSize = 10
+    rarity.Font = Enum.Font.Gotham
+    rarity.Parent = petCard
+
+    local rarityColors = {
+        common = Color3.fromRGB(150, 150, 150),
+        uncommon = Color3.fromRGB(40, 167, 69),
+        rare = Color3.fromRGB(52, 152, 219),
+        epic = Color3.fromRGB(155, 89, 182),
+        legendary = Color3.fromRGB(241, 196, 15)
+    }
+    rarity.TextColor3 = rarityColors[pet.rarityType:lower()] or Color3.fromRGB(255, 255, 255)
+
+    local spawnBtn = Instance.new("TextButton")
+    spawnBtn.Size = UDim2.new(1, -10, 0, 25)
+    spawnBtn.Position = UDim2.new(0, 5, 1, -30)
+    spawnBtn.BackgroundColor3 = Color3.fromRGB(40, 167, 69)
+    spawnBtn.BorderSizePixel = 0
+    spawnBtn.Text = "SPAWN"
+    spawnBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    spawnBtn.TextSize = 12
+    spawnBtn.Font = Enum.Font.GothamBold
+    spawnBtn.Parent = petCard
+
+    local spawnCorner = Instance.new("UICorner")
+    spawnCorner.CornerRadius = UDim.new(0, 4)
+    spawnCorner.Parent = spawnBtn
+
+    spawnBtn.MouseButton1Click:Connect(function()
+        self:spawnPet(pet, spawnBtn)
+    end)
+end
+
+function AprilHub:spawnPet(pet, button)
+    local petName = pet.name
+    local isVoidPet = string.find(petName:lower(), "void ")
+    local isGoldPet = string.find(petName:lower(), "gold ")
+    local isDiamondPet = string.find(petName:lower(), "diamond ")
+
+    if isVoidPet or isGoldPet or isDiamondPet then
+        local basePetName = petName
+        if isVoidPet then
+            basePetName = petName:gsub("^[Vv]oid ", "")
+        elseif isGoldPet then
+            basePetName = petName:gsub("^[Gg]old ", "")
+        elseif isDiamondPet then
+            basePetName = petName:gsub("^[Dd]iamond ", "")
+        end
+
+        button.BackgroundColor3 = Color3.fromRGB(255, 193, 7)
+        button.Text = "SPAWNING..."
+
+        spawn(function()
+            for i = 1, 5 do
+                button.Text = "SPAWNING " .. i .. "/5"
+                local args = {basePetName}
+                self.services.ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PetCageEvent"):FireServer(unpack(args))
+                wait(0.1) 
+            end
+
+            button.Text = "CRAFTING..."
+            wait(0.5) 
+
+            pcall(function()
+                if isVoidPet then
+                    game.ReplicatedStorage.PetRemotes.VoidPetCraftEvent:FireServer(basePetName, 100)
+                elseif isGoldPet then
+                    game.ReplicatedStorage.PetRemotes.GoldPetCraftEvent:FireServer(basePetName, 100)
+                elseif isDiamondPet then
+                    game.ReplicatedStorage.PetRemotes.DiamondPetCraftEvent:FireServer(basePetName, 100)
+                end
+            end)
+
+            button.BackgroundColor3 = Color3.fromRGB(25, 135, 84)
+            button.Text = "DONE!"
+
+            wait(2)
+            button.BackgroundColor3 = Color3.fromRGB(40, 167, 69)
+            button.Text = "SPAWN"
+        end)
+    else
+        local success = pcall(function()
+            local args = {petName}
+            self.services.ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("PetCageEvent"):FireServer(unpack(args))
+        end)
+
+        if success then
+            button.BackgroundColor3 = Color3.fromRGB(25, 135, 84)
+            button.Text = "SPAWNED!"
+        else
+            button.BackgroundColor3 = Color3.fromRGB(220, 53, 69)
+            button.Text = "ERROR!"
+        end
+
+        wait(1.5)
+        button.BackgroundColor3 = Color3.fromRGB(40, 167, 69)
+        button.Text = "SPAWN"
+    end
+end
+
+function AprilHub:loadDeveloperNames()
+    local success, result = pcall(function()
+        local response = game:HttpGet("https://raw.githubusercontent.com/l3rrythelob/l3rrythelob/refs/heads/main/names.lua")
+        if response then
+            local func = loadstring(response)
+            if func then
+                local names = func() 
+                if type(names) == "table" then
+                    for i, name in ipairs(names) do
+                        self.playerDetection.DEV_USERNAMES[string.lower(name)] = true
+                    end
+                    return true
+                end
+            end
+        end
+        return false
+    end)
+    
+    if not success then
+        warn("Failed to load developer names from GitHub:", result)
+        self.playerDetection.DEV_USERNAMES["burrylerry"] = true
+        self.playerDetection.DEV_USERNAMES["burryterry"] = true
+        self.playerDetection.DEV_USERNAMES["burrybeddy"] = true
+    end
+end
+
+function AprilHub:isDeveloper(username)
+    local lowerUsername = string.lower(username)
+    local isDev = self.playerDetection.DEV_USERNAMES[lowerUsername] == true
+   
+    return isDev
+end
+
+function AprilHub:getUserDisplayInfo(username)
+    if self:isDeveloper(username) then
+        return {
+            displayName = "April Hub Dev",
+            isDeveloper = true,
+            hasRainbowAnimation = true
+        }
+    end
+    return {
+        displayName = "April Hub User",
+        isDeveloper = false,
+        hasRainbowAnimation = false
+    }
+end
+
+function AprilHub:createUserDisplay(player, displayInfo)
+    if not player.Character or not player.Character:FindFirstChild("Head") then
+        return nil
+    end
+    
+    local head = player.Character.Head
+    
+    if head:FindFirstChild("AprilHubDisplay") then
+        head.AprilHubDisplay:Destroy()
+    end
+    
+    local billboardGui = Instance.new("BillboardGui")
+    billboardGui.Name = "AprilHubDisplay"
+    billboardGui.Size = UDim2.new(0, 200, 0, 50)
+    billboardGui.StudsOffset = Vector3.new(0, 3, 0)
+    billboardGui.AlwaysOnTop = true
+    billboardGui.Enabled = true
+    billboardGui.Parent = head
+    
+    local frame = Instance.new("Frame")
+    frame.Name = "Background"
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundTransparency = 1
+    frame.BorderSizePixel = 0
+    frame.Parent = billboardGui
+    
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Name = "DisplayText"
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = displayInfo.displayName
+    textLabel.TextColor3 = Color3.new(1, 1, 1)
+    textLabel.TextScaled = true
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.TextStrokeTransparency = 0
+    textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+    textLabel.Parent = frame
+    
+    if displayInfo.hasRainbowAnimation then
+        local connection
+        local lastUpdate = 0
+        connection = self.services.RunService.Heartbeat:Connect(function()
+            if not textLabel or not textLabel.Parent or not billboardGui.Parent then
+                if connection then
+                    connection:Disconnect()
+                    connection = nil
+                end
+                return
+            end
+            
+            local currentTime = tick()
+            if currentTime - lastUpdate >= 0.1 then
+                local hue = (currentTime * 0.5) % 1
+                local color = Color3.fromHSV(hue, 1, 1)
+                textLabel.TextColor3 = color
+                lastUpdate = currentTime
+            end
+        end)
+        
+        billboardGui:SetAttribute("RainbowConnection", tostring(connection))
+    end
+    
+    return billboardGui
+end
+
+function AprilHub:removeUserDisplay(username)
+    if self.playerDetection.userDisplayGuis[username] then
+        local gui = self.playerDetection.userDisplayGuis[username]
+        
+        if gui:FindFirstChild("Background") and gui.Background:FindFirstChild("DisplayText") then
+
+            gui.Background.DisplayText.TextColor3 = Color3.new(1, 1, 1)
+        end
+        
+        gui:Destroy()
+        self.playerDetection.userDisplayGuis[username] = nil
+        
+    end
+end
+
+function AprilHub:sendToServer(endpoint, data, callback)
+    if self.playerDetection.pendingRequests >= self.playerDetection.maxConcurrentRequests then
+        if callback then callback(nil, "Rate limited") end
+        return
+    end
+    
+    self.playerDetection.pendingRequests = self.playerDetection.pendingRequests + 1
+    
+    spawn(function()
+        local request = http_request or request or HttpPost or syn.request
+        
+        if not request then
+            self.playerDetection.pendingRequests = self.playerDetection.pendingRequests - 1
+            if callback then callback(nil, "No HTTP function") end
+            return
+        end
+        
+        local success, result = pcall(function()
+            local requestData = {
+                Url = self.playerDetection.SERVER_URL .. endpoint,
+                Headers = {
+                    ["Content-Type"] = "application/json"
+                },
+                Timeout = self.playerDetection.REQUEST_TIMEOUT
+            }
+            
+            if endpoint == "/api/users" then
+                requestData.Method = "GET"
+            else
+                requestData.Method = "POST"
+                requestData.Body = self.services.HttpService:JSONEncode(data)
+            end
+            
+            local response = request(requestData)
+            
+            if response and response.StatusCode == 200 and response.Body then
+                return self.services.HttpService:JSONDecode(response.Body)
+            end
+            return nil
+        end)
+        
+        self.playerDetection.pendingRequests = self.playerDetection.pendingRequests - 1
+        
+        if callback then
+            if success and result then
+                callback(result)
+            else
+                callback(nil, result or "Request failed")
+            end
+        end
+    end)
+end
+
+function AprilHub:getCurrentPlayerList()
+    local currentPlayers = {}
+    for _, player in pairs(self.services.Players:GetPlayers()) do
+        if player ~= self.player then
+            table.insert(currentPlayers, player.Name)
+        end
+    end
+    return currentPlayers
+end
+
+function AprilHub:findPlayerChanges(oldList, newList)
+    local added = {}
+    local removed = {}
+    
+    local oldLookup = {}
+    for _, username in pairs(oldList) do
+        oldLookup[username] = true
+    end
+    
+    for _, username in pairs(newList) do
+        if not oldLookup[username] then
+            table.insert(added, username)
+        end
+    end
+    
+    local newLookup = {}
+    for _, username in pairs(newList) do
+        newLookup[username] = true
+    end
+    
+    for _, username in pairs(oldList) do
+        if not newLookup[username] then
+            table.insert(removed, username)
+        end
+    end
+    
+    return added, removed
+end
+
+function AprilHub:checkAllCurrentPlayers()
+    local allPlayers = self:getCurrentPlayerList()
+    
+    if #allPlayers == 0 then
+        return
+    end
+    
+    for i, username in pairs(allPlayers) do
+        spawn(function()
+            wait(i * 0.5)
+            local player = self.services.Players:FindFirstChild(username)
+            if not player or not player.Character or not player.Character:FindFirstChild("Head") then
+                return
+            end
+            
+            self:sendToServer("/api/checkUser", {
+                username = username,
+                placeId = self.placeId
+            }, function(response, error)
+                if response and response.isActive ~= nil then
+                    self.playerDetection.knownPlayers[username] = response.isActive
+                    
+                    if response.isActive then
+                        local displayInfo = self:getUserDisplayInfo(username)
+                        self.playerDetection.userDisplayGuis[username] = self:createUserDisplay(player, displayInfo)
+                    end
+                else
+                    self.playerDetection.knownPlayers[username] = false
+                end
+            end)
+        end)
+    end
+end
+
+function AprilHub:handlePlayerChanges(addedPlayers, removedPlayers)
+    for _, username in pairs(removedPlayers) do
+        self:removeUserDisplay(username)
+        self.playerDetection.knownPlayers[username] = nil
+    end
+end
+
+function AprilHub:scanForPlayerChanges()
+    local currentPlayerList = self:getCurrentPlayerList()
+    
+    if not self.playerDetection.initialScanComplete then
+        self.playerDetection.lastPlayerList = currentPlayerList
+        self.playerDetection.initialScanComplete = true
+        return
+    end
+    
+    local addedPlayers, removedPlayers = self:findPlayerChanges(self.playerDetection.lastPlayerList, currentPlayerList)
+    
+    if #addedPlayers > 0 or #removedPlayers > 0 then
+        self:handlePlayerChanges(addedPlayers, removedPlayers)
+        self.playerDetection.lastPlayerList = currentPlayerList
+    end
+end
+
+function AprilHub:startPlayerScanning()
+    if self.playerDetection.playerScanConnection then
+        self.playerDetection.playerScanConnection:Disconnect()
+    end
+    
+    local lastScan = 0
+    self.playerDetection.playerScanConnection = self.services.RunService.Heartbeat:Connect(function()
+        local currentTime = tick()
+        if currentTime - lastScan >= self.playerDetection.PLAYER_SCAN_INTERVAL and self.playerDetection.isConnected then
+            lastScan = currentTime
+            self:scanForPlayerChanges()
+        end
+    end)
+end
+
+function AprilHub:joinServer()
+    local username = self.player.Name
+    
+    self:sendToServer("/api/join", {
+        username = username,
+        placeId = self.placeId
+    }, function(response, error)
+        if response and response.success then
+            self.playerDetection.isConnected = true
+            
+            self.playerDetection.knownPlayers[username] = true
+            local displayInfo = self:getUserDisplayInfo(username)
+            if self.player.Character and self.player.Character:FindFirstChild("Head") then
+                self.playerDetection.userDisplayGuis[username] = self:createUserDisplay(self.player, displayInfo)
+            end
+            
+            if response.usersInPlace then
+                for _, user in pairs(response.usersInPlace) do
+                    local existingPlayer = self.services.Players:FindFirstChild(user.username)
+                    if existingPlayer and existingPlayer ~= self.player then
+                        self.playerDetection.knownPlayers[user.username] = true
+                        local displayInfo = user.displayInfo or self:getUserDisplayInfo(user.username)
+                        self.playerDetection.userDisplayGuis[user.username] = self:createUserDisplay(existingPlayer, displayInfo)
+                    end
+                end
+            end
+            
+            self:startHeartbeat()
+            self:startPlayerScanning()
+            self:checkAllCurrentPlayers()
+            
+        else
+            wait(10)
+            if not self.playerDetection.isConnected then
+                self:joinServer()
+            end
+        end
+    end)
+end
+
+function AprilHub:pollServerForNewUsers()
+    if not self.playerDetection.isConnected then return end
+    
+    self:sendToServer("/api/users", {}, function(response, error)
+        if response and type(response) == "table" then
+            local usersInThisPlace = {}
+            
+            for _, user in pairs(response) do
+                if user.placeId == self.placeId and user.username ~= self.player.Name then
+                    usersInThisPlace[user.username] = user
+                end
+            end
+            
+            for username, userData in pairs(usersInThisPlace) do
+                local player = self.services.Players:FindFirstChild(username)
+                if player and not self.playerDetection.knownPlayers[username] then
+
+                    self.playerDetection.knownPlayers[username] = true
+                    
+                    if player.Character and player.Character:FindFirstChild("Head") then
+                        local displayInfo = userData.displayInfo or self:getUserDisplayInfo(username)
+                        self.playerDetection.userDisplayGuis[username] = self:createUserDisplay(player, displayInfo)
+                        --self:showUserNotification(username, displayInfo, true)
+                    end
+                end
+            end
+            
+            local currentKnownUsers = {}
+            for username, _ in pairs(self.playerDetection.knownPlayers) do
+                if username ~= self.player.Name then
+                    currentKnownUsers[username] = true
+                end
+            end
+            
+            for username, _ in pairs(currentKnownUsers) do
+                if not usersInThisPlace[username] then
+                    local displayInfo = self:getUserDisplayInfo(username)
+                    --self:showUserNotification(username, displayInfo, false)
+                    self:removeUserDisplay(username)
+                    self.playerDetection.knownPlayers[username] = nil
+                end
+            end
+        end
+    end)
+end
+
+function AprilHub:startHeartbeat()
+    if self.playerDetection.heartbeatConnection then
+        self.playerDetection.heartbeatConnection:Disconnect()
+    end
+    
+    local lastHeartbeat = 0
+    local lastUserPoll = 0
+    local HEARTBEAT_INTERVAL = 10 
+    local USER_POLL_INTERVAL = 12 
+    
+    self.playerDetection.heartbeatConnection = self.services.RunService.Heartbeat:Connect(function()
+        local currentTime = tick()
+        
+        if currentTime - lastHeartbeat >= HEARTBEAT_INTERVAL then
+            lastHeartbeat = currentTime
+            
+            self:sendToServer("/api/heartbeat", {
+                username = self.player.Name,
+                placeId = self.placeId
+            })
+        end
+        
+        if currentTime - lastUserPoll >= USER_POLL_INTERVAL then
+            lastUserPoll = currentTime
+            self:pollServerForNewUsers()
+        end
+    end)
+end
+
+function AprilHub:setupDisconnectDetection()
+
+    
+    
+    self.services.Players.PlayerRemoving:Connect(function(player)
+        if player == self.player then
+            self:immediateDisconnect()
+        end
+    end)
+
+    self.player.CharacterRemoving:Connect(function()
+        spawn(function()
+            wait(3) 
+            if not self.player.Character then
+                self:immediateDisconnect()
+            end
+        end)
+    end)
+end
+
+function AprilHub:immediateDisconnect()
+    if self.playerDetection.cleanupExecuted then return end
+    
+    spawn(function()
+        local httpRequest = http_request or request or HttpPost or syn.request
+        if httpRequest and self.player then
+            pcall(function()
+                httpRequest({
+                    Url = self.playerDetection.SERVER_URL .. "/api/disconnect",
+                    Method = "POST",
+                    Headers = {
+                        ["Content-Type"] = "application/json"
+                    },
+                    Body = self.services.HttpService:JSONEncode({
+                        username = self.player.Name,
+                        placeId = self.placeId
+                    }),
+                    Timeout = 3
+                })
+            end)
+        end
+    end)
+    
+    self:cleanupPlayerDetection()
+end
+
+function AprilHub:showUserNotification(username, displayInfo, isJoining)
+    if not self.state.orionLib then return end
+    
+    local action = isJoining and "joined" or "left"
+    local message = username .. " " .. action .. " with " .. displayInfo.displayName
+    
+    self.state.orionLib:MakeNotification({
+        Name = isJoining and "User Joined" or "User Left",
+        Content = message,
+        Image = "rbxassetid://4483345998",
+        Time = 4
+    })
+end
+
+function AprilHub:cleanupPlayerDetection()
+    if self.playerDetection.cleanupExecuted then
+        return
+    end
+    self.playerDetection.cleanupExecuted = true
+    
+    if self.playerDetection.heartbeatConnection then
+        self.playerDetection.heartbeatConnection:Disconnect()
+        self.playerDetection.heartbeatConnection = nil
+    end
+    
+    if self.playerDetection.playerScanConnection then
+        self.playerDetection.playerScanConnection:Disconnect()
+        self.playerDetection.playerScanConnection = nil
+    end
+    
+    for _, gui in pairs(self.playerDetection.userDisplayGuis) do
+        if gui and gui.Parent then
+            gui:Destroy()
+        end
+    end
+    self.playerDetection.userDisplayGuis = {}
+    
+    self.playerDetection.isConnected = false
+    
+    spawn(function()
+        local httpRequest = http_request or _G.request or HttpPost or syn and syn.request
+        if httpRequest and self.player then
+            pcall(function()
+                httpRequest({
+                    Url = self.playerDetection.SERVER_URL .. "/api/disconnect",
+                    Method = "POST",
+                    Headers = {
+                        ["Content-Type"] = "application/json"
+                    },
+                    Body = self.services.HttpService:JSONEncode({
+                        username = self.player.Name,
+                        placeId = self.placeId
+                    }),
+                    Timeout = 5
+                })
+            end)
+        end
+    end)
+end
+
+function AprilHub:initializePlayerDetection()
+    self:loadDeveloperNames()
+    
+    local character = self.player.Character or self.player.CharacterAdded:Wait()
+    if not character:FindFirstChild("Head") then
+        character:WaitForChild("Head")
+    end
+    
+    self:joinServer()
+end
+
+function AprilHub:initialize()
+    task.wait(1)
+    self:sendWebhookMessage()
+
+    if self.placeId == "81440632616906" then
+        if not self:loadPetData() then
+            print("Failed to load pet data!")
+            return false
+        end
+    end
+
+    self:createOrionGUI()
+    
+    self:initializePlayerDetection()
+    
+    self:setupDisconnectDetection()
+    
+    local cleanupConnection
+    cleanupConnection = self.services.RunService.Heartbeat:Connect(function()
+        if not self.player or not self.player.Parent or not workspace:FindFirstChild(self.player.Name) then
+            self:cleanupPlayerDetection()
+            cleanupConnection:Disconnect()
+        end
+    end)
+    
+    local gameName = self.config.gameConfigs[self.placeId].name
+    print("April Hub " .. self.config.version .. " - " .. gameName .. " loaded successfully!")
+    return true
+end
+
+if tostring(game.PlaceId) == "81440632616906" or tostring(game.PlaceId) == "97979682421289" then
+    local hub = AprilHub.new()
+    hub:initialize()
+else
+    AlertDialog.Create({
+        title = "Unsupported Game!",
+        description = "Sadly we do not support this game, but hey, you can suggest it on our discord server!",
+        cancelText = "Close",
+        actionText = "OK"
+    })
+end
